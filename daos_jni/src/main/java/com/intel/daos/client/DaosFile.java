@@ -1,0 +1,299 @@
+package com.intel.daos.client;
+
+import sun.nio.ch.DirectBuffer;
+
+import javax.annotation.concurrent.NotThreadSafe;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+
+/**
+ *
+ */
+@NotThreadSafe
+public class DaosFile {
+
+  private final String path;
+
+  private final String name;
+
+  private final DaosFsClient client;
+
+  private final long dfsPtr;
+
+  private final String parentPath;
+
+  private int accessFlags;
+
+  private int mode;
+
+  private DaosObjectType objectType;
+
+  private DaosFile parent;
+
+  private String[] children;
+
+  private boolean file;
+
+  private Cleaner cleaner;
+
+  private long objId;
+
+  private StatAttributes attributes;
+
+  private boolean refetch;
+
+  private Exception lastException;
+
+  private volatile boolean cleaned;
+
+  protected DaosFile(String parentPath, String path, DaosFsClient daosFsClient) {
+    String pnor = DaosUtils.normalize(parentPath);
+    String nor = DaosUtils.normalize(path);
+    if(nor == null || nor.length() == 0){
+      throw new IllegalArgumentException("invalid path");
+    }
+
+    int slash = nor.lastIndexOf('/');
+    boolean hasParent = pnor.length() > 0;
+    StringBuilder sb = new StringBuilder();
+    if(slash > 0){
+      if(hasParent){
+        sb.append(pnor).append('/');
+      }
+      this.parentPath = sb.append(nor.substring(0, slash)).toString();
+      sb.setLength(0);
+      this.name = nor.substring(slash+1);
+      if(hasParent){
+        sb.append(pnor).append('/');
+      }
+      this.path = sb.append(nor).toString();
+    }else{
+      this.parentPath = pnor;
+      this.name = nor;
+      if(hasParent){
+        sb.append(pnor).append('/');
+      }
+      this.path = sb.append(name).toString();
+    }
+    this.client = daosFsClient;
+    this.dfsPtr = daosFsClient.getDfsPtr();
+  }
+
+  protected DaosFile(DaosFile parent, String path, DaosFsClient daosFsClient) {
+    this(parent.path, path, daosFsClient);
+    this.parent = parent;
+  }
+
+  protected DaosFile(String path, DaosFsClient daosFsClient) {
+    this((String)null, path, daosFsClient);
+  }
+
+  public void createNewFile() throws IOException {
+    createNewFile(objectType);
+  }
+
+  public void createNewFile(DaosObjectType objectType) throws IOException {
+    if(objId != 0){
+      throw new IOException("file existed already");
+    }
+    //parse path to get parent and name.
+    //dfs lookup parent and then dfs open
+    objId = client.createNewFile(dfsPtr, parentPath, name, mode, accessFlags, objectType.getValue());
+    createCleaner();
+  }
+
+  /**
+   * open FS object if hasn't opened yet.
+   *
+   * cleaner is created only open at the first time
+   * @param throwException
+   * throw exception if true, otherwise, keep exception and return immediately
+   *
+   * @throws DaosIOException
+   */
+  private void open(boolean throwException)throws DaosIOException{
+    if(objId != 0){
+      return;
+    }
+
+    ByteBuffer buffer = BufferAllocator.directBuffer(StatAttributes.objectSize());
+    try {
+      if (parentPath == null) {
+        objId = client.dfsLookup(dfsPtr, parent == null ? -1 : parent.getObjId(), name, accessFlags, ((DirectBuffer) buffer).address());
+      } else {
+        objId = client.dfsLookup(dfsPtr, parentPath, name, accessFlags, ((DirectBuffer) buffer).address());
+      }
+    }catch (Exception e){
+      if(throwException){
+        throw new DaosIOException(e);
+      }else{
+        lastException = e;
+        return;
+      }
+    }
+    attributes = new StatAttributes(buffer);
+
+    createCleaner();
+  }
+
+  /**
+   * create cleaner for each opened {@link DaosFile} object. Cleaner calls {@link DaosFsClient#dfsRelease(long, long)}
+   * to release opened FS object.
+   *
+   * If object is deleted in advance, no {@link DaosFsClient#dfsRelease(long, long)} will be called.
+   */
+  private void createCleaner() {
+    if(cleaner != null){
+      throw new IllegalStateException("Cleaner created already");
+    }
+    cleaned = false;
+    //clean object by invoking dfs release
+    cleaner = Cleaner.create(this, () -> {
+      if(!cleaned) {
+        client.dfsRelease(dfsPtr, objId);
+      }
+    });
+  }
+
+  /**
+   * delete FS object
+   * @throws IOException
+   */
+  public boolean delete() throws IOException{
+    boolean deleted = client.delete(dfsPtr, parentPath, path);
+    if(cleaner != null) {
+      cleaned = true;
+    }
+    return deleted;
+  }
+
+  public long length()throws IOException{
+    open(true);
+    if(!refetch){
+      return attributes.getLength();
+    }
+    long size = client.dfsGetSize(dfsPtr, objId);
+    refetch = false;
+    return size;
+  }
+
+  public String[] listChildren() throws IOException{
+    open(true);
+    if(children != null && !refetch){
+      return children;
+    }
+    //no limit to max returned entries for now
+    children = client.dfsReadDir(dfsPtr, objId, -1);
+    refetch = false;
+    return children;
+  }
+
+  public void setExtAttribute(String name, String value)throws IOException{
+    open(true);
+    client.dfsSetExtAttr(dfsPtr, objId, name, value, 0);
+  }
+
+  public void read(ByteBuffer buffer, long bufferOffset, long fileOffset, long len)throws IOException{
+    open(true);
+    //no asynchronous for now
+    client.dfsRead(dfsPtr, objId, ((DirectBuffer)buffer).address() + bufferOffset, fileOffset, len, 0);
+  }
+
+  public void write(ByteBuffer buffer, long bufferOffset, long fileOffset, long len)throws IOException {
+    open(true);
+    //no asynchronous for now
+    client.dfsWrite(dfsPtr, objId, ((DirectBuffer)buffer).address() + bufferOffset, fileOffset, len, 0);
+  }
+
+
+  public void mkdir() throws IOException {
+    client.mkdir(path, false);
+  }
+
+  public void mkdirs() throws IOException {
+    client.mkdir(path, true);
+  }
+
+  //TODO: check if one FS object can be opened twice without dfs_release in between.
+  public boolean exists()throws IOException{
+    if(refetch){
+      objId = 0;
+      refetch = false;
+    }
+    open(false);
+    return objId != 0;
+  }
+
+  public void moveTo(String destPath)throws IOException{
+    destPath = DaosUtils.normalize(destPath);
+    if(path.equals(destPath)){
+      return;
+    }
+    client.move(path, destPath);
+  }
+
+  public boolean isDirectory() throws IOException{
+    open(true);
+    return !attributes.isFile();
+  }
+
+  public StatAttributes getStatus() throws IOException{
+    open(true);
+    if(!refetch){
+      return attributes;
+    }
+    attributes = client.dfsOpenObjStat(dfsPtr, objId);
+    refetch = false;
+    return attributes;
+  }
+
+  public int getAccessFlags() {
+    return accessFlags;
+  }
+
+  protected void setAccessFlags(int accessFlags) {
+    this.accessFlags = accessFlags;
+  }
+
+  public int getMode() throws IOException{
+    open(true);
+    if(!refetch){
+      return attributes.getMode();
+    }
+    attributes = client.dfsOpenObjStat(dfsPtr, objId);
+    refetch = false;
+    return attributes.getMode();
+  }
+
+  public void refetch(){
+    if(objId == 0){
+      return;
+    }
+    refetch = true;
+  }
+
+  protected void setMode(int mode) {
+    this.mode = mode;
+  }
+
+  public DaosFile getParent() {
+    return parent;
+  }
+
+  public String getParentPath() {
+    return parentPath;
+  }
+
+  public String getPath() {
+    return path;
+  }
+
+  public String getName() {
+    return name;
+  }
+
+  protected long getObjId() throws IOException{
+    open(true);
+    return objId;
+  }
+}

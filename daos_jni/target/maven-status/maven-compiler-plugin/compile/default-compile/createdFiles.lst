@@ -1,0 +1,12 @@
+com/intel/daos/client/DaosIOException.class
+com/intel/daos/client/DaosFsClient$ObjectType.class
+com/intel/daos/client/Cleaner$CleanerTask.class
+com/intel/daos/client/Cleaner$1.class
+com/intel/daos/client/Configuration.class
+com/intel/daos/client/DaosFile.class
+com/intel/daos/client/Cleaner.class
+com/intel/daos/client/DaosFsClient$1.class
+com/intel/daos/client/DaosFsClient.class
+com/intel/daos/client/DaosFsClient$DaosFsClientBuilder.class
+com/intel/daos/client/DaosUtils.class
+com/intel/daos/client/StatAttributes.class

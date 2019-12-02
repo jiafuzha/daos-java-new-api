@@ -1,0 +1,8 @@
+/code-repo/daos-java-interface/daos_jni/src/main/java/com/intel/daos/client/StatAttributes.java
+/code-repo/daos-java-interface/daos_jni/src/main/java/com/intel/daos/client/Cleaner.java
+/code-repo/daos-java-interface/daos_jni/src/main/java/com/intel/daos/client/DaosFsClient.java
+/code-repo/daos-java-interface/daos_jni/src/main/java/com/intel/daos/client/DaosFile.java
+/code-repo/daos-java-interface/daos_jni/src/main/java/com/intel/daos/client/Configuration.java
+/code-repo/daos-java-interface/daos_jni/src/main/java/com/intel/daos/client/DaosIOException.java
+/code-repo/daos-java-interface/daos_jni/src/main/java/com/intel/daos/client/package-info.java
+/code-repo/daos-java-interface/daos_jni/src/main/java/com/intel/daos/client/DaosUtils.java
