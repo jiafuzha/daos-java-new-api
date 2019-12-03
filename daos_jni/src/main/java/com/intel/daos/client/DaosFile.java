@@ -1,5 +1,30 @@
+/*
+ * (C) Copyright 2018-2019 Intel Corporation.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * GOVERNMENT LICENSE RIGHTS-OPEN SOURCE SOFTWARE
+ * The Government's rights to use, modify, reproduce, release, perform, display,
+ * or disclose this software are subject to the terms of the Apache License as
+ * provided in Contract No. B609815.
+ * Any reproduction of computer software, computer software documentation, or
+ * portions thereof marked with this legend must also reproduce the markings.
+ */
+
 package com.intel.daos.client;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import sun.nio.ch.DirectBuffer;
 
 import javax.annotation.concurrent.NotThreadSafe;
@@ -7,7 +32,15 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 
 /**
+ * This class mimics {@link java.io.File} class to represent DAOS FS object and provide similar methods, like
+ * {@link #delete()}, {@link #createNewFile()}, {@link #exists()}, {@link #length()}. The creation of this object
+ * doesn't involve any remote operation which is delayed and invoked on-demand.
  *
+ * Considering its distributed file system, file information is cached for later access. If you want to get up-to-date
+ * file info, you can call {@link #refetch()} before your normal operations.
+ *
+ * @see DaosFsClient
+ * @see Cleaner
  */
 @NotThreadSafe
 public class DaosFile {
@@ -32,8 +65,6 @@ public class DaosFile {
 
   private String[] children;
 
-  private boolean file;
-
   private Cleaner cleaner;
 
   private long objId;
@@ -45,6 +76,8 @@ public class DaosFile {
   private Exception lastException;
 
   private volatile boolean cleaned;
+
+  private static final Logger log = LoggerFactory.getLogger(DaosFile.class);
 
   protected DaosFile(String parentPath, String path, DaosFsClient daosFsClient) {
     String pnor = DaosUtils.normalize(parentPath);
@@ -126,7 +159,7 @@ public class DaosFile {
     }catch (Exception e){
       if(throwException){
         throw new DaosIOException(e);
-      }else{
+      }else{//TODO: verify error code to determine existence, if it's other error code, throw it anyway.
         lastException = e;
         return;
       }
@@ -150,7 +183,11 @@ public class DaosFile {
     //clean object by invoking dfs release
     cleaner = Cleaner.create(this, () -> {
       if(!cleaned) {
-        client.dfsRelease(dfsPtr, objId);
+        try {
+          client.dfsRelease(dfsPtr, objId);
+        }catch (IOException e){
+          log.error("failed to release fs object "+objId, e);
+        }
       }
     });
   }
@@ -207,24 +244,27 @@ public class DaosFile {
 
 
   public void mkdir() throws IOException {
-    client.mkdir(path, false);
+    client.mkdir(path, mode,false);
   }
 
   public void mkdirs() throws IOException {
-    client.mkdir(path, true);
+    client.mkdir(path, mode, true);
   }
 
-  //TODO: check if one FS object can be opened twice without dfs_release in between.
   public boolean exists()throws IOException{
-    if(refetch){
-      objId = 0;
-      refetch = false;
-    }
     open(false);
-    return objId != 0;
+    if(!refetch) {
+      return objId != 0;
+    }
+    try {
+      refetchAttributes();
+    }catch (Exception e){//TODO: verify error code to determine existence
+      return false;
+    }
+    return true;
   }
 
-  public void moveTo(String destPath)throws IOException{
+  public void rename(String destPath)throws IOException{
     destPath = DaosUtils.normalize(destPath);
     if(path.equals(destPath)){
       return;
@@ -242,9 +282,35 @@ public class DaosFile {
     if(!refetch){
       return attributes;
     }
-    attributes = client.dfsOpenObjStat(dfsPtr, objId);
-    refetch = false;
+    refetchAttributes();
     return attributes;
+  }
+
+  public long getCreateTime()throws IOException{
+    open(true);
+    if(!refetch){
+      return attributes.getCreateTime();
+    }
+    refetchAttributes();
+    return attributes.getCreateTime();
+  }
+
+  public long getAccessTime()throws IOException{
+    open(true);
+    if(!refetch){
+      return attributes.getAccessTime();
+    }
+    refetchAttributes();
+    return attributes.getAccessTime();
+  }
+
+  public long getModifyTime()throws IOException{
+    open(true);
+    if(!refetch){
+      return attributes.getModifyTime();
+    }
+    refetchAttributes();
+    return attributes.getModifyTime();
   }
 
   public int getAccessFlags() {
@@ -260,13 +326,19 @@ public class DaosFile {
     if(!refetch){
       return attributes.getMode();
     }
-    attributes = client.dfsOpenObjStat(dfsPtr, objId);
-    refetch = false;
+    refetchAttributes();
     return attributes.getMode();
   }
 
+  private void refetchAttributes()throws IOException{
+    ByteBuffer buffer = BufferAllocator.directBuffer(StatAttributes.objectSize());
+    client.dfsOpenedObjStat(dfsPtr, objId, ((DirectBuffer) buffer).address());
+    attributes = new StatAttributes(buffer);
+    refetch = false;
+  }
+
   public void refetch(){
-    if(objId == 0){
+    if(objId == 0){//avoid refetch just after first time open
       return;
     }
     refetch = true;
@@ -274,6 +346,10 @@ public class DaosFile {
 
   protected void setMode(int mode) {
     this.mode = mode;
+  }
+
+  public void setObjectType(DaosObjectType objectType) {
+    this.objectType = objectType;
   }
 
   public DaosFile getParent() {
