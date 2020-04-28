@@ -1,0 +1,1 @@
+gcc -g --std=gnu99 -I/usr/local -I/usr/local/daos/include -L/usr/local/daos/lib -L/usr/local/daos/lib64 -L/usr/lib -L/usr/lib64 -L/usr/local/lib -L/usr/local/lib64 test_map_reduce.c -otest_map_reduce.o -ldaos  -luuid -ldaos_common -ldfs -lcart
